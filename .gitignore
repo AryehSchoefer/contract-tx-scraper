@@ -3,4 +3,7 @@ data_*
 __pycache__
 *.csv
 *.json
+results/
+.DS_STORE
+*.png
 

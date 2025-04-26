@@ -39,7 +39,7 @@ def get_input_data_tx(
 
         if not input_data or input_data == '0x' or not contract_address:
             if verbose:
-                print("No input data found for this transaction.")
+                print("  No input data found for this transaction.")
             return None
 
         try:
@@ -73,4 +73,3 @@ def get_input_data_tx(
     except Exception as e:
         print(f"An unexpected error occurred while processing transaction {tx_hash.hex()}: {e}")
         return None
-
