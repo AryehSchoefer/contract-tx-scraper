@@ -1,58 +1,46 @@
 from web3 import Web3
 from hexbytes import HexBytes
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, Union
 
-def get_input_data_tx(
+def decode_transaction_input(
     w3: Web3,
-    tx_hash: HexBytes,
+    input_data: Union[HexBytes, str, None],
     contract_abi: list,
+    contract_address: str,
     verbose: bool = False
 ) -> Optional[Tuple[str, Dict[str, Any]]]:
     """
-    Retrieves a transaction by hash and decodes its input data using the contract ABI.
+    Decodes transaction input data using the contract ABI and address.
 
     Args:
-        w3: An initialized web3.py client instance connected to the network.
-        tx_hash: The transaction hash as a HexBytes object.
+        w3: An initialized web3.py client instance (used for utilities like checksumming).
+        input_data: The raw transaction input data as HexBytes or a hex string.
         contract_abi: The ABI of the contract called in the transaction, as a list.
+        contract_address: The address of the contract called in the transaction.
         verbose: If True, print more detailed information during processing.
 
     Returns:
         A tuple containing the function name (str) and a dictionary of decoded
-        parameters (Dict[str, Any]), or None if the transaction has no input
-        data or decoding fails.
+        parameters (Dict[str, Any]), or None if decoding fails or input data is empty.
     """
     try:
-        tx = w3.eth.get_transaction(tx_hash)
-        if tx is None:
-            if verbose:
-                 print(f"Error: Transaction with hash {tx_hash.hex()} not found.")
-            return None
-
-        if verbose:
-            print(f"Processing transaction: {tx_hash.hex()}")
-            print(f"  From: {tx.get('from')}")
-            print(f"  To: {tx.get('to')}")
-
-        input_data = tx.get('input')
-        contract_address = tx.get('to')
-
         if not input_data or input_data == '0x' or not contract_address:
             if verbose:
-                print("  No input data found for this transaction.")
+                print("  No input data found or contract address missing for decoding.")
             return None
 
         try:
             checksum_address = w3.to_checksum_address(contract_address)
             contract = w3.eth.contract(address=checksum_address, abi=contract_abi)
             if verbose:
-                print("  Contract instance created.")
+                print("  Contract instance created for decoding.")
         except Exception as e:
             print(f"Error creating contract instance for address {contract_address}. Check contract address and ABI: {e}")
             return None
 
         try:
-            func_obj, func_params = contract.decode_function_input(input_data)
+            input_bytes = HexBytes(input_data) if isinstance(input_data, str) else input_data
+            func_obj, func_params = contract.decode_function_input(input_bytes)
 
             if verbose:
                 print(f"\n  --- Decoded Input Data ---")
@@ -65,11 +53,12 @@ def get_input_data_tx(
             return func_obj.fn_name, func_params
 
         except Exception as e:
+            # this error often means the ABI doesn't match the function called
             if verbose:
-                print(f"  Error decoding input data using the provided ABI: {e}")
-                print(f"  Raw Input Data: {input_data}")
+                print(f"  Error decoding input data using the provided ABI for tx (hash not available here): {e}")
             return None
 
     except Exception as e:
-        print(f"An unexpected error occurred while processing transaction {tx_hash.hex()}: {e}")
+        print(f"An unexpected error occurred during decoding: {e}")
         return None
+
