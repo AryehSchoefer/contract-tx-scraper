@@ -11,7 +11,7 @@ import argparse
 
 from config import Config
 from src.tx_details import decode_transaction_input
-from src.output import plot_decoding_success, plot_genesis_transitions_over_time, plot_identity_frequency_bubble_chart, save_results_csv
+from src.output import plot_decoding_success, plot_genesis_transitions_over_time, plot_identity_frequency_bubble_chart, plot_daily_genesis_transitions, save_results_csv
 
 config = Config()
 
@@ -123,6 +123,7 @@ def run_analytics(verbose: bool = False):
         verbose: If True, print more detailed information during processing.
     """
     print("Starting analytics run...")
+    start_time = time.time()
 
     if not config.rpc_url or not config.transactions_csv_path or not config.abi_json_path:
         print("Error: Missing required configuration values (RPC_URL, TRANSACTIONS_CSV_PATH, ABI_JSON_PATH). Please set environment variables.")
@@ -257,6 +258,7 @@ def run_analytics(verbose: bool = False):
     plot_decoding_success(successful_decodes, failed_decodes, results_dir, current_timestamp)
     plot_genesis_transitions_over_time(analytics_results_decoded, results_dir, current_timestamp)
     plot_identity_frequency_bubble_chart(analytics_results_decoded, results_dir, current_timestamp)
+    plot_daily_genesis_transitions(analytics_results_decoded, results_dir, current_timestamp)
 
     save_results_csv(raw_results, results_dir, current_timestamp)
 
@@ -273,6 +275,10 @@ def run_analytics(verbose: bool = False):
             elif 'error' in result:
                  print(f"  Error: {result.get('error')}")
             print("-" * 20)
+
+    end_time = time.time()
+    total_duration = end_time - start_time
+    print(f"\nTotal script execution time: {total_duration:.2f} seconds")
 
 
 if __name__ == "__main__":

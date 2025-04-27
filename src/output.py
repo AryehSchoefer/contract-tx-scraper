@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import pandas as pd
 import os
 from collections import Counter 
@@ -69,6 +70,56 @@ def plot_genesis_transitions_over_time(results: List[Dict[str, Any]], results_di
         print(f"Genesis transitions chart saved to {genesis_chart_path}")
     except Exception as e:
         print(f"Error saving genesis transitions chart: {e}")
+    plt.close()
+
+def plot_daily_genesis_transitions(results: List[Dict[str, Any]], results_dir: str, timestamp: int):
+    """
+    Generates and saves a bar chart showing the number of genesis transitions per day.
+    """
+    print("\nGenerating Daily Genesis Transitions graphic...")
+
+    genesis_transitions = [
+        r for r in results
+        if r.get("decoding_successful") and r.get("is_genesis_transition") and r.get("timestamp") is not None
+    ]
+
+    if not genesis_transitions:
+        print("No genesis transition transactions with timestamps found to plot daily counts.")
+        return
+
+    genesis_df = pd.DataFrame(genesis_transitions)
+
+    genesis_df['date'] = pd.to_datetime(genesis_df['timestamp'], unit='s').dt.date
+
+    daily_counts = genesis_df['date'].value_counts().sort_index()
+
+    if daily_counts.empty:
+        print("No daily genesis transition counts to plot.")
+        return
+
+    plt.figure(figsize=(15, 7))
+    ax = plt.gca()
+
+    ax.bar(daily_counts.index, daily_counts.values, color='skyblue')
+
+    plt.xlabel('Date')
+    plt.ylabel('Number of Genesis Transitions')
+    plt.title('Daily Genesis Identity Transitions Over Time')
+    plt.grid(axis='y', linestyle='--', alpha=0.6)
+
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    plt.xticks(rotation=45, ha='right')
+
+    plt.tight_layout()
+
+    daily_chart_filename = f"{timestamp}_daily_genesis_transitions.png"
+    daily_chart_path = os.path.join(results_dir, daily_chart_filename)
+    try:
+        plt.savefig(daily_chart_path)
+        print(f"Daily genesis transitions chart saved to {daily_chart_path}")
+    except Exception as e:
+        print(f"Error saving daily genesis transitions chart: {e}")
     plt.close()
 
 def plot_identity_frequency_bubble_chart(results: List[Dict[str, Any]], results_dir: str, timestamp: int):
