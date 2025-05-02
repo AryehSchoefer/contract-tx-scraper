@@ -1,7 +1,7 @@
 from web3 import Web3
-from web3.middleware import ExtraDataToPOAMiddleware
+from web3.middleware import ExtraDataToPOAMiddleware 
 from hexbytes import HexBytes
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 import json
 import os
 import time
@@ -11,7 +11,17 @@ import argparse
 
 from config import Config
 from src.tx_details import decode_transaction_input
-from src.output import plot_decoding_success, plot_genesis_transitions_over_time, plot_identity_frequency_bubble_chart, plot_daily_genesis_transitions, save_results_csv
+from src.output import (
+    plot_privado_decoding_success,
+    plot_privado_genesis_cumulative,
+    plot_privado_genesis_daily,
+    plot_privado_identity_frequency_bubble_chart,
+    plot_civic_minting_success,
+    plot_civic_cumulative_minted_tokens_over_time,
+    plot_civic_daily_minted_tokens,
+    plot_civic_recipient_address_frequency_bubble_chart,
+    save_results_csv
+)
 
 config = Config()
 
@@ -20,28 +30,38 @@ def process_transaction_task(
     hex_hash_string: str,
     contract_abi: list,
     contract_address_from_config: Optional[str],
+    null_address: str,
+    analysis_mode: str,
     verbose: bool
 ) -> Dict[str, Any]:
     """
-    Task function to fetch transaction, get timestamp, and decode input data.
+    Task function to fetch transaction, get timestamp, and process based on analysis mode.
 
     Args:
         w3: Web3 client.
         hex_hash_string: Transaction hash string.
-        contract_abi: Contract ABI.
+        contract_abi: Contract ABI relevant to the analysis mode.
         contract_address_from_config: The contract address specified in config (optional).
+        null_address: The configured null address (0x0...0), used in 'civic' mode.
+        analysis_mode: The selected analysis mode ('privado' or 'civic').
         verbose: Verbose flag.
 
     Returns:
-        Dictionary containing transaction hash, timestamp, and decoding results.
+        Dictionary containing transaction hash, timestamp, and analysis results based on mode.
     """
     result_entry: Dict[str, Any] = {
         "transaction_hash": hex_hash_string,
         "timestamp": None,
+        # fields for Privado mode
         "decoded_function": None,
         "decoded_parameters": None,
-        "is_genesis_transition": False, # specific to Privado ID use case, but can be generalized
-        "decoding_successful": False,
+        "is_genesis_transition": False,
+        "privado_decoding_successful": False, 
+        # fields for Civic mode
+        "is_minting_event": False,
+        "recipient_address": None,
+        "token_id": None,
+        "civic_log_processing_successful": False, # specific success flag for Civic log processing
         "error": None
     }
     tx_hash_bytes = HexBytes(hex_hash_string)
@@ -76,36 +96,88 @@ def process_transaction_task(
                  print(f"\nError fetching block {block_number} for transaction {hex_hash_string}: {e}")
              return result_entry
 
+        address_for_mode_processing = contract_address_from_config if contract_address_from_config else tx.get('to')
 
-        address_for_decoding = contract_address_from_config if contract_address_from_config else tx.get('to')
-
-        if not address_for_decoding:
-             result_entry["error"] = "Contract address not available for decoding"
+        if not address_for_mode_processing:
+             result_entry["error"] = "Contract address not available for processing in this mode"
              if verbose:
-                 print(f"\nError: Contract address not available for decoding transaction {hex_hash_string}.")
+                 print(f"\nError: Contract address not available for processing transaction {hex_hash_string} in mode '{analysis_mode}'.")
              return result_entry
 
-        input_data = tx.get('input')
 
-        decoded_data = decode_transaction_input(w3, input_data, contract_abi, address_for_decoding, verbose)
+        # --- Process based on Analysis Mode ---
+        if analysis_mode == 'privado':
+            # Privado ID Mode: decode input data and check for genesis transition
+            input_data = tx.get('input')
+            input_data_for_decoding: Union[HexBytes, str, None] = input_data
 
-        if decoded_data:
-            function_name, parameters = decoded_data
-            result_entry["decoded_function"] = function_name
-            result_entry["decoded_parameters"] = parameters
-            result_entry["decoding_successful"] = True
+            decoded_data = decode_transaction_input(w3, input_data_for_decoding, contract_abi, address_for_mode_processing, verbose)
 
-            # check for isOldStateGenesis only if parameters are decoded and the key exists
-            # this check is specific to the Privado ID use case and could be made configurable
-            if parameters and 'isOldStateGenesis' in parameters and parameters['isOldStateGenesis'] is True:
-                 result_entry["is_genesis_transition"] = True
+            if decoded_data:
+                function_name, parameters = decoded_data
+                result_entry["decoded_function"] = function_name
+                result_entry["decoded_parameters"] = parameters
+                result_entry["privado_decoding_successful"] = True # Mark as successful for Privado mode
+
+                # check for isOldStateGenesis only if parameters are decoded and the key exists
+                if parameters and 'isOldStateGenesis' in parameters and parameters['isOldStateGenesis'] is True:
+                     result_entry["is_genesis_transition"] = True
+
+            else:
+                # if decoding failed, the error might already be set in decode_transaction_input
+                result_entry["error"] = result_entry.get("error", "Privado decoding failed or no input data")
+
+
+        elif analysis_mode == 'civic':
+            # Civic Mode: Process event logs to find minting events
+            try:
+                checksum_event_address = w3.to_checksum_address(address_for_mode_processing)
+                contract_for_events = w3.eth.contract(address=checksum_event_address, abi=contract_abi)
+
+                for log in tx.get('logs', []):
+                    try:
+                        # decode the log using the contract's event ABI
+                        decoded_log = contract_for_events.events.Transfer().process_log(log)
+
+                        # check if it's an ERC-721 Transfer event from the null address
+                        if (decoded_log and
+                            decoded_log.get('event') == 'Transfer' and
+                            decoded_log.get('args') and
+                            decoded_log['args'].get('from') == null_address):
+
+                            # found a minting event; extract details
+                            result_entry["is_minting_event"] = True
+                            result_entry["recipient_address"] = decoded_log['args'].get('to')
+                            result_entry["token_id"] = decoded_log['args'].get('tokenId')
+                            result_entry["civic_log_processing_successful"] = True
+
+                            if verbose:
+                                print(f"\n  Found Minting Event in {hex_hash_string}:")
+                                print(f"    Recipient: {result_entry['recipient_address']}")
+                                print(f"    Token ID: {result_entry['token_id']}")
+
+                            break
+
+                    except Exception as e:
+                        pass
+
+                if not result_entry["is_minting_event"]:
+                     result_entry["error"] = result_entry.get("error", "No minting event found in logs")
+
+
+            except Exception as e:
+                result_entry["error"] = f"Error processing event logs: {e}"
+                if verbose:
+                    print(f"\nError processing event logs for transaction {hex_hash_string}: {e}")
 
         else:
-            result_entry["error"] = result_entry.get("error", "Decoding failed or no input data")
+            # should not happen due to config validation, but as a fallback
+            result_entry["error"] = f"Unsupported analysis mode: {analysis_mode}"
+            print(f"\nError: Unsupported analysis mode '{analysis_mode}' for transaction {hex_hash_string}.")
 
 
     except Exception as e:
-        result_entry["error"] = f"Unexpected error during processing: {e}"
+        result_entry["error"] = f"Unexpected error during transaction fetch or initial processing: {e}"
         print(f"\nAn unexpected error occurred while processing transaction {hex_hash_string}: {e}")
 
 
@@ -115,26 +187,31 @@ def process_transaction_task(
 def run_analytics(verbose: bool = False):
     """
     Loads configuration, transaction hashes, and ABI, then processes
-    each transaction concurrently to decode input data.
-    Filters transactions based on configured methods.
+    each transaction concurrently based on the selected analysis mode.
+    Filters transactions based on configured methods (optional).
     Generates graphics and saves results.
 
     Args:
         verbose: If True, print more detailed information during processing.
     """
-    print("Starting analytics run...")
     start_time = time.time()
 
-    if not config.rpc_url or not config.transactions_csv_path or not config.abi_json_path:
-        print("Error: Missing required configuration values (RPC_URL, TRANSACTIONS_CSV_PATH, ABI_JSON_PATH). Please set environment variables.")
+    print("Starting analytics run...")
+    print(f"Analysis Mode: {config.analysis_mode.capitalize()}")
+
+    # required_config = ["rpc_url", "transactions_csv_path", "abi_json_path", "contract_address"]
+    required_config = ["rpc_url", "transactions_csv_path", "abi_json_path"]
+    if not all(getattr(config, attr) for attr in required_config):
+        missing = [attr for attr in required_config if not getattr(config, attr)]
+        print(f"Error: Missing required configuration values: {', '.join(missing)}. Please set environment variables.")
         return
 
     try:
         w3 = Web3(Web3.HTTPProvider(config.rpc_url))
         if config.apply_poa_middleware:
-            w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-            if verbose:
-                print("Applied Geth POA middleware.")
+             w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+             if verbose:
+                 print("Applied Geth POA middleware.")
 
         if not w3.is_connected():
             print(f"Error: Failed to connect to network at {config.rpc_url}. Check RPC_URL.")
@@ -146,7 +223,7 @@ def run_analytics(verbose: bool = False):
 
     transactions_to_process_df: pd.DataFrame = pd.DataFrame()
     try:
-        df = pd.read_csv(config.transactions_csv_path)
+        df = pd.read_csv(config.transactions_csv_path) # type: ignore // csv_path can't be None here
 
         if 'Transaction Hash' not in df.columns:
             print(f"Error: CSV file '{config.transactions_csv_path}' does not contain a 'Transaction Hash' column.")
@@ -163,9 +240,9 @@ def run_analytics(verbose: bool = False):
             print("No methods specified for filtering. Processing all transactions in the CSV.")
             filtered_df = df.copy()
 
-        transactions_to_process_df = filtered_df.copy() # type: ignore
+        transactions_to_process_df = filtered_df.copy()
         transactions_to_process_df['Transaction Hash'] = transactions_to_process_df['Transaction Hash'].astype(str)
-        transactions_to_process_df = transactions_to_process_df.dropna(subset=['Transaction Hash'])
+        transactions_to_process_df: pd.DataFrame = transactions_to_process_df.dropna(subset=['Transaction Hash'])
 
 
         print(f"Loaded {len(df)} transactions from {config.transactions_csv_path}.")
@@ -181,7 +258,7 @@ def run_analytics(verbose: bool = False):
 
     contract_abi: list = []
     try:
-        with open(config.abi_json_path, 'r') as f:
+        with open(config.abi_json_path, 'r') as f: # type: ignore // json_path can't be None here
             contract_abi = json.load(f)
         print(f"Loaded contract ABI from {config.abi_json_path}.")
     except FileNotFoundError:
@@ -205,8 +282,10 @@ def run_analytics(verbose: bool = False):
                 str(row['Transaction Hash']),
                 contract_abi,
                 config.contract_address,
+                config.null_address,
+                config.analysis_mode,
                 verbose
-            ): row['Transaction Hash']
+            ): str(row['Transaction Hash'])
             for _, row in transactions_to_process_df.iterrows()
         }
 
@@ -224,15 +303,20 @@ def run_analytics(verbose: bool = False):
                 raw_results.append(result)
             except Exception as e:
                 print(f"\nAn error occurred during task execution for hash {hex_hash_string}: {e}")
-                raw_results.append({
+                failed_entry: Dict[str, Any] = {
                     "transaction_hash": hex_hash_string,
                     "timestamp": None,
                     "decoded_function": None,
                     "decoded_parameters": None,
                     "is_genesis_transition": False,
-                    "decoding_successful": False,
+                    "privado_decoding_successful": False,
+                    "is_minting_event": False,
+                    "recipient_address": None,
+                    "token_id": None,
+                    "civic_log_processing_successful": False,
                     "error": f"Task execution failed: {e}"
-                })
+                }
+                raw_results.append(failed_entry)
 
 
     if not verbose:
@@ -241,13 +325,6 @@ def run_analytics(verbose: bool = False):
     print("\nAnalytics run complete.")
     print(f"Total transactions processed (including failures): {len(raw_results)}")
 
-    analytics_results_decoded = [r for r in raw_results if r.get("decoding_successful")]
-    successful_decodes = len(analytics_results_decoded)
-    failed_decodes = len(raw_results) - successful_decodes
-
-    print(f"Successfully decoded input data for {successful_decodes} transactions.")
-    print(f"Failed to decode input data for {failed_decodes} transactions.")
-
     results_dir = "results"
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
@@ -255,25 +332,49 @@ def run_analytics(verbose: bool = False):
 
     current_timestamp = int(time.time())
 
-    plot_decoding_success(successful_decodes, failed_decodes, results_dir, current_timestamp)
-    plot_genesis_transitions_over_time(analytics_results_decoded, results_dir, current_timestamp)
-    plot_identity_frequency_bubble_chart(analytics_results_decoded, results_dir, current_timestamp)
-    plot_daily_genesis_transitions(analytics_results_decoded, results_dir, current_timestamp)
+    if config.analysis_mode == 'privado':
+        privado_decoded_results = [r for r in raw_results if r.get("privado_decoding_successful")]
+        successful_count = len(privado_decoded_results)
+        failed_count = len(raw_results) - successful_count
+
+        plot_privado_decoding_success(successful_count, failed_count, results_dir, current_timestamp)
+        plot_privado_genesis_cumulative(privado_decoded_results, results_dir, current_timestamp)
+        plot_privado_genesis_daily(privado_decoded_results, results_dir, current_timestamp)
+        plot_privado_identity_frequency_bubble_chart(privado_decoded_results, results_dir, current_timestamp)
+
+    elif config.analysis_mode == 'civic':
+        civic_minting_results = [r for r in raw_results if r.get("is_minting_event")]
+        successful_count = len(civic_minting_results)
+        # this counts transactions where we didn't find a minting event or had errors
+        failed_count = len(raw_results) - successful_count
+
+        plot_civic_minting_success(successful_count, failed_count, results_dir, current_timestamp)
+        plot_civic_cumulative_minted_tokens_over_time(civic_minting_results, results_dir, current_timestamp)
+        plot_civic_daily_minted_tokens(civic_minting_results, results_dir, current_timestamp)
+        plot_civic_recipient_address_frequency_bubble_chart(civic_minting_results, results_dir, current_timestamp)
 
     save_results_csv(raw_results, results_dir, current_timestamp)
+
 
     if verbose:
         print("\n--- Example Raw Results (First 5) ---")
         for _, result in enumerate(raw_results[:5]):
             print(f"Tx Hash: {result.get('transaction_hash')}")
-            print(f"  Successful: {result.get('decoding_successful')}")
             print(f"  Timestamp: {result.get('timestamp')}")
-            print(f"  Is Genesis: {result.get('is_genesis_transition')}")
-            if result.get('decoded_successful'):
-                print(f"  Function: {result.get('decoded_function')}")
-                print(f"  Params: {result.get('decoded_parameters')}")
-            elif 'error' in result:
+            if result.get('error'):
                  print(f"  Error: {result.get('error')}")
+            if config.analysis_mode == 'privado':
+                 print(f"  Privado Decoding Successful: {result.get('privado_decoding_successful')}")
+                 print(f"  Is Genesis Transition: {result.get('is_genesis_transition')}")
+                 if result.get('privado_decoding_successful'):
+                      print(f"  Function: {result.get('decoded_function')}")
+                      print(f"  Params: {result.get('decoded_parameters')}")
+            elif config.analysis_mode == 'civic':
+                 print(f"  Civic Log Processing Successful: {result.get('civic_log_processing_successful')}")
+                 print(f"  Is Minting Event: {result.get('is_minting_event')}")
+                 if result.get('is_minting_event'):
+                      print(f"  Recipient: {result.get('recipient_address')}")
+                      print(f"  Token ID: {result.get('token_id')}")
             print("-" * 20)
 
     end_time = time.time()
