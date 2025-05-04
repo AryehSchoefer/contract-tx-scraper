@@ -1,5 +1,5 @@
 from web3 import Web3
-from web3.middleware import ExtraDataToPOAMiddleware 
+from web3.middleware import ExtraDataToPOAMiddleware
 from hexbytes import HexBytes
 from typing import Dict, Any, List, Optional, Union
 import json
@@ -30,7 +30,7 @@ def process_transaction_task(
     hex_hash_string: str,
     contract_abi: list,
     contract_address_from_config: Optional[str],
-    null_address: str,
+    null_address: str, # needed for Civic mode
     analysis_mode: str,
     verbose: bool
 ) -> Dict[str, Any]:
@@ -56,7 +56,7 @@ def process_transaction_task(
         "decoded_function": None,
         "decoded_parameters": None,
         "is_genesis_transition": False,
-        "privado_decoding_successful": False, 
+        "privado_decoding_successful": False, # specific success flag for Privado decoding
         # fields for Civic mode
         "is_minting_event": False,
         "recipient_address": None,
@@ -117,7 +117,7 @@ def process_transaction_task(
                 function_name, parameters = decoded_data
                 result_entry["decoded_function"] = function_name
                 result_entry["decoded_parameters"] = parameters
-                result_entry["privado_decoding_successful"] = True # Mark as successful for Privado mode
+                result_entry["privado_decoding_successful"] = True
 
                 # check for isOldStateGenesis only if parameters are decoded and the key exists
                 if parameters and 'isOldStateGenesis' in parameters and parameters['isOldStateGenesis'] is True:
@@ -131,50 +131,27 @@ def process_transaction_task(
         elif analysis_mode == 'civic':
             # Civic Mode: Process event logs to find minting events
             try:
-                checksum_event_address = w3.to_checksum_address(address_for_mode_processing)
-                contract_for_events = w3.eth.contract(address=checksum_event_address, abi=contract_abi)
-
-                for log in tx.get('logs', []):
-                    try:
-                        # decode the log using the contract's event ABI
-                        decoded_log = contract_for_events.events.Transfer().process_log(log)
-
-                        # check if it's an ERC-721 Transfer event from the null address
-                        if (decoded_log and
-                            decoded_log.get('event') == 'Transfer' and
-                            decoded_log.get('args') and
-                            decoded_log['args'].get('from') == null_address):
-
-                            # found a minting event; extract details
+                receipt = w3.eth.get_transaction_receipt(tx_hash_bytes)
+                transfer_event_signature = w3.keccak(text="Transfer(address,address,uint256)").hex()
+                for log in receipt["logs"]:
+                    if log['topics'][0].hex() == transfer_event_signature:
+                        from_address = w3.to_checksum_address(log['topics'][1].hex()[-40:])
+                        if from_address == null_address:
                             result_entry["is_minting_event"] = True
-                            result_entry["recipient_address"] = decoded_log['args'].get('to')
-                            result_entry["token_id"] = decoded_log['args'].get('tokenId')
                             result_entry["civic_log_processing_successful"] = True
-
-                            if verbose:
-                                print(f"\n  Found Minting Event in {hex_hash_string}:")
-                                print(f"    Recipient: {result_entry['recipient_address']}")
-                                print(f"    Token ID: {result_entry['token_id']}")
-
-                            break
-
-                    except Exception as e:
-                        pass
+                            result_entry["recipient_address"] = w3.to_checksum_address(log['topics'][2].hex()[-40:])
+                            result_entry["token_id"] = int(log['topics'][3].hex(), 16)
 
                 if not result_entry["is_minting_event"]:
                      result_entry["error"] = result_entry.get("error", "No minting event found in logs")
-
 
             except Exception as e:
                 result_entry["error"] = f"Error processing event logs: {e}"
                 if verbose:
                     print(f"\nError processing event logs for transaction {hex_hash_string}: {e}")
-
         else:
-            # should not happen due to config validation, but as a fallback
             result_entry["error"] = f"Unsupported analysis mode: {analysis_mode}"
             print(f"\nError: Unsupported analysis mode '{analysis_mode}' for transaction {hex_hash_string}.")
-
 
     except Exception as e:
         result_entry["error"] = f"Unexpected error during transaction fetch or initial processing: {e}"
@@ -206,6 +183,13 @@ def run_analytics(verbose: bool = False):
         print(f"Error: Missing required configuration values: {', '.join(missing)}. Please set environment variables.")
         return
 
+
+    # needed for type checking
+    assert config.transactions_csv_path is not None, "transactions_csv_path must be set after config validation"
+    # assert config.contract_address is not None, "contract_address must be set after config validation"
+    assert config.abi_json_path is not None, "abi_json_path must be set after config validation"
+    assert config.rpc_url is not None, "rpc_url must be set after config validation"
+
     try:
         w3 = Web3(Web3.HTTPProvider(config.rpc_url))
         if config.apply_poa_middleware:
@@ -223,12 +207,12 @@ def run_analytics(verbose: bool = False):
 
     transactions_to_process_df: pd.DataFrame = pd.DataFrame()
     try:
-        df = pd.read_csv(config.transactions_csv_path) # type: ignore // csv_path can't be None here
+        df = pd.read_csv(config.transactions_csv_path, index_col=False)
 
         if 'Transaction Hash' not in df.columns:
             print(f"Error: CSV file '{config.transactions_csv_path}' does not contain a 'Transaction Hash' column.")
             return
-        if 'Method' not in df.columns:
+        if config.analysis_mode == 'Civic' and 'Method' not in df.columns:
              print(f"Error: CSV file '{config.transactions_csv_path}' does not contain a 'Method' column.")
              return
 
@@ -244,9 +228,17 @@ def run_analytics(verbose: bool = False):
         transactions_to_process_df['Transaction Hash'] = transactions_to_process_df['Transaction Hash'].astype(str)
         transactions_to_process_df: pd.DataFrame = transactions_to_process_df.dropna(subset=['Transaction Hash'])
 
+        initial_row_count = len(transactions_to_process_df)
+        transactions_to_process_df.drop_duplicates(subset=['Transaction Hash'], inplace=True)
+        deduplicated_row_count = len(transactions_to_process_df)
 
-        print(f"Loaded {len(df)} transactions from {config.transactions_csv_path}.")
-        print(f"Filtered down to {len(transactions_to_process_df)} transactions to process.")
+        if initial_row_count > deduplicated_row_count:
+            print(f"Removed {initial_row_count - deduplicated_row_count} duplicate transaction hashes.")
+
+        print(f"Loaded {initial_row_count} transactions from {config.transactions_csv_path}.")
+        print(f"Filtered down to {len(filtered_df)} transactions before deduplication.")
+        print(f"Processing {deduplicated_row_count} unique transactions after filtering and deduplication.")
+
 
 
     except FileNotFoundError:
@@ -258,13 +250,13 @@ def run_analytics(verbose: bool = False):
 
     contract_abi: list = []
     try:
-        with open(config.abi_json_path, 'r') as f: # type: ignore // json_path can't be None here
+        with open(config.abi_json_path, 'r') as f:
             contract_abi = json.load(f)
         print(f"Loaded contract ABI from {config.abi_json_path}.")
     except FileNotFoundError:
         print(f"Error: ABI JSON file not found at '{config.abi_json_path}'.")
         return
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
         print(f"Error: Could not decode JSON from '{config.abi_json_path}'. Ensure it's valid JSON.")
         return
     except Exception as e:
@@ -325,35 +317,37 @@ def run_analytics(verbose: bool = False):
     print("\nAnalytics run complete.")
     print(f"Total transactions processed (including failures): {len(raw_results)}")
 
-    results_dir = "results"
-    if not os.path.exists(results_dir):
-        os.makedirs(results_dir)
-        print(f"Created results directory: {results_dir}")
-
+    base_results_dir = "results"
+    mode_results_dir = os.path.join(base_results_dir, config.analysis_mode)
     current_timestamp = int(time.time())
+    timestamped_results_dir = os.path.join(mode_results_dir, str(current_timestamp))
+
+    if not os.path.exists(timestamped_results_dir):
+        os.makedirs(timestamped_results_dir)
+        print(f"Created results directory: {timestamped_results_dir}")
+
 
     if config.analysis_mode == 'privado':
         privado_decoded_results = [r for r in raw_results if r.get("privado_decoding_successful")]
         successful_count = len(privado_decoded_results)
         failed_count = len(raw_results) - successful_count
 
-        plot_privado_decoding_success(successful_count, failed_count, results_dir, current_timestamp)
-        plot_privado_genesis_cumulative(privado_decoded_results, results_dir, current_timestamp)
-        plot_privado_genesis_daily(privado_decoded_results, results_dir, current_timestamp)
-        plot_privado_identity_frequency_bubble_chart(privado_decoded_results, results_dir, current_timestamp)
+        plot_privado_decoding_success(successful_count, failed_count, timestamped_results_dir, current_timestamp)
+        plot_privado_genesis_cumulative(privado_decoded_results, timestamped_results_dir, current_timestamp)
+        plot_privado_genesis_daily(privado_decoded_results, timestamped_results_dir, current_timestamp)
+        plot_privado_identity_frequency_bubble_chart(privado_decoded_results, timestamped_results_dir, current_timestamp)
 
     elif config.analysis_mode == 'civic':
         civic_minting_results = [r for r in raw_results if r.get("is_minting_event")]
         successful_count = len(civic_minting_results)
-        # this counts transactions where we didn't find a minting event or had errors
         failed_count = len(raw_results) - successful_count
 
-        plot_civic_minting_success(successful_count, failed_count, results_dir, current_timestamp)
-        plot_civic_cumulative_minted_tokens_over_time(civic_minting_results, results_dir, current_timestamp)
-        plot_civic_daily_minted_tokens(civic_minting_results, results_dir, current_timestamp)
-        plot_civic_recipient_address_frequency_bubble_chart(civic_minting_results, results_dir, current_timestamp)
+        plot_civic_minting_success(successful_count, failed_count, timestamped_results_dir, current_timestamp)
+        plot_civic_cumulative_minted_tokens_over_time(civic_minting_results, timestamped_results_dir, current_timestamp)
+        plot_civic_daily_minted_tokens(civic_minting_results, timestamped_results_dir, current_timestamp)
+        plot_civic_recipient_address_frequency_bubble_chart(civic_minting_results, timestamped_results_dir, current_timestamp)
 
-    save_results_csv(raw_results, results_dir, current_timestamp)
+    save_results_csv(raw_results, timestamped_results_dir, current_timestamp)
 
 
     if verbose:
