@@ -20,6 +20,9 @@ from src.output import (
     plot_civic_cumulative_minted_tokens_over_time,
     plot_civic_daily_minted_tokens,
     plot_civic_recipient_address_frequency_bubble_chart,
+    plot_worldid_decoding_success,
+    plot_worldid_registrations_cumulative,
+    plot_worldid_registrations_daily,
     save_results_csv
 )
 
@@ -32,6 +35,8 @@ def process_transaction_task(
     contract_address_from_config: Optional[str],
     null_address: str, # needed for Civic mode
     analysis_mode: str,
+    privado_genesis_method: str,
+    worldid_register_method: str,
     verbose: bool
 ) -> Dict[str, Any]:
     """
@@ -43,7 +48,9 @@ def process_transaction_task(
         contract_abi: Contract ABI relevant to the analysis mode.
         contract_address_from_config: The contract address specified in config (optional).
         null_address: The configured null address (0x0...0), used in 'civic' mode.
-        analysis_mode: The selected analysis mode ('privado' or 'civic').
+        analysis_mode: The selected analysis mode ('privado', 'civic', or 'worldid').
+        privado_genesis_method: The configured method name for Privado genesis.
+        worldid_register_method: The configured method name for World ID registration.
         verbose: Verbose flag.
 
     Returns:
@@ -52,16 +59,18 @@ def process_transaction_task(
     result_entry: Dict[str, Any] = {
         "transaction_hash": hex_hash_string,
         "timestamp": None,
-        # fields for Privado mode
+        # Fields for Privado/World ID modes (input decoding)
         "decoded_function": None,
         "decoded_parameters": None,
-        "is_genesis_transition": False,
-        "privado_decoding_successful": False, # specific success flag for Privado decoding
-        # fields for Civic mode
+        "is_genesis_transition": False, # Privado specific
+        "is_worldid_registration": False, # World ID specific
+        "privado_decoding_successful": False,
+        "worldid_decoding_successful": False,
+        # Fields for Civic mode (log processing)
         "is_minting_event": False,
         "recipient_address": None,
         "token_id": None,
-        "civic_log_processing_successful": False, # specific success flag for Civic log processing
+        "civic_log_processing_successful": False,
         "error": None
     }
     tx_hash_bytes = HexBytes(hex_hash_string)
@@ -119,17 +128,36 @@ def process_transaction_task(
                 result_entry["decoded_parameters"] = parameters
                 result_entry["privado_decoding_successful"] = True
 
-                # check for isOldStateGenesis only if parameters are decoded and the key exists
-                if parameters and 'isOldStateGenesis' in parameters and parameters['isOldStateGenesis'] is True:
+                # check if the decoded function is the genesis method AND has the genesis flag
+                if function_name == privado_genesis_method and parameters and 'isOldStateGenesis' in parameters and parameters['isOldStateGenesis'] is True:
                      result_entry["is_genesis_transition"] = True
 
             else:
-                # if decoding failed, the error might already be set in decode_transaction_input
                 result_entry["error"] = result_entry.get("error", "Privado decoding failed or no input data")
 
 
+        elif analysis_mode == 'worldid':
+            # World ID Mode: decode input data and check for registration method
+            input_data = tx.get('input')
+            input_data_for_decoding: Union[HexBytes, str, None] = input_data
+
+            decoded_data = decode_transaction_input(w3, input_data_for_decoding, contract_abi, address_for_mode_processing, verbose)
+
+            if decoded_data:
+                function_name, parameters = decoded_data
+                result_entry["decoded_function"] = function_name
+                result_entry["decoded_parameters"] = parameters
+                result_entry["worldid_decoding_successful"] = True # Specific success flag for World ID decoding
+
+                # check if the decoded function is the registration method
+                if function_name == worldid_register_method:
+                     result_entry["is_worldid_registration"] = True
+
+            else:
+                result_entry["error"] = result_entry.get("error", "World ID decoding failed or no input data")
+
         elif analysis_mode == 'civic':
-            # Civic Mode: Process event logs to find minting events
+            # Civic Mode: process event logs to find minting events
             try:
                 receipt = w3.eth.get_transaction_receipt(tx_hash_bytes)
                 transfer_event_signature = w3.keccak(text="Transfer(address,address,uint256)").hex()
@@ -149,9 +177,12 @@ def process_transaction_task(
                 result_entry["error"] = f"Error processing event logs: {e}"
                 if verbose:
                     print(f"\nError processing event logs for transaction {hex_hash_string}: {e}")
+
+
         else:
             result_entry["error"] = f"Unsupported analysis mode: {analysis_mode}"
             print(f"\nError: Unsupported analysis mode '{analysis_mode}' for transaction {hex_hash_string}.")
+
 
     except Exception as e:
         result_entry["error"] = f"Unexpected error during transaction fetch or initial processing: {e}"
@@ -175,16 +206,13 @@ def run_analytics(verbose: bool = False):
 
     print("Starting analytics run...")
     print(f"Analysis Mode: {config.analysis_mode.capitalize()}")
-
-    # required_config = ["rpc_url", "transactions_csv_path", "abi_json_path", "contract_address"]
     required_config = ["rpc_url", "transactions_csv_path", "abi_json_path"]
+
     if not all(getattr(config, attr) for attr in required_config):
         missing = [attr for attr in required_config if not getattr(config, attr)]
         print(f"Error: Missing required configuration values: {', '.join(missing)}. Please set environment variables.")
         return
 
-
-    # needed for type checking
     assert config.transactions_csv_path is not None, "transactions_csv_path must be set after config validation"
     # assert config.contract_address is not None, "contract_address must be set after config validation"
     assert config.abi_json_path is not None, "abi_json_path must be set after config validation"
@@ -212,7 +240,7 @@ def run_analytics(verbose: bool = False):
         if 'Transaction Hash' not in df.columns:
             print(f"Error: CSV file '{config.transactions_csv_path}' does not contain a 'Transaction Hash' column.")
             return
-        if config.analysis_mode == 'Civic' and 'Method' not in df.columns:
+        if config.analysis_mode != 'civic' and 'Method' not in df.columns:
              print(f"Error: CSV file '{config.transactions_csv_path}' does not contain a 'Method' column.")
              return
 
@@ -240,12 +268,11 @@ def run_analytics(verbose: bool = False):
         print(f"Processing {deduplicated_row_count} unique transactions after filtering and deduplication.")
 
 
-
     except FileNotFoundError:
         print(f"Error: CSV file not found at '{config.transactions_csv_path}'.")
         return
     except Exception as e:
-        print(f"Error reading or filtering CSV file '{config.transactions_csv_path}': {e}")
+        print(f"Error reading, filtering, or deduplicating CSV file '{config.transactions_csv_path}': {e}")
         return
 
     contract_abi: list = []
@@ -256,7 +283,7 @@ def run_analytics(verbose: bool = False):
     except FileNotFoundError:
         print(f"Error: ABI JSON file not found at '{config.abi_json_path}'.")
         return
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError:
         print(f"Error: Could not decode JSON from '{config.abi_json_path}'. Ensure it's valid JSON.")
         return
     except Exception as e:
@@ -264,7 +291,7 @@ def run_analytics(verbose: bool = False):
         return
 
     raw_results: List[Dict[str, Any]] = []
-    print(f"Processing {len(transactions_to_process_df)} transactions concurrently with {config.max_workers} workers...")
+    print(f"Processing {len(transactions_to_process_df)} unique transactions concurrently with {config.max_workers} workers...")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=config.max_workers) as executor:
         future_to_hash = {
@@ -276,18 +303,21 @@ def run_analytics(verbose: bool = False):
                 config.contract_address,
                 config.null_address,
                 config.analysis_mode,
+                config.privado_genesis_method,
+                config.worldid_register_method,
                 verbose
             ): str(row['Transaction Hash'])
             for _, row in transactions_to_process_df.iterrows()
         }
 
         completed_count = 0
+        total_to_process = len(transactions_to_process_df)
         for future in concurrent.futures.as_completed(future_to_hash):
             completed_count += 1
             hex_hash_string = future_to_hash[future]
 
             if not verbose:
-                 print(f"Completed {completed_count}/{len(transactions_to_process_df)}: {hex_hash_string}", end='\r')
+                 print(f"Completed {completed_count}/{total_to_process}: {hex_hash_string}", end='\r')
 
 
             try:
@@ -302,6 +332,7 @@ def run_analytics(verbose: bool = False):
                     "decoded_parameters": None,
                     "is_genesis_transition": False,
                     "privado_decoding_successful": False,
+                    "is_worldid_registration": False,
                     "is_minting_event": False,
                     "recipient_address": None,
                     "token_id": None,
@@ -315,7 +346,7 @@ def run_analytics(verbose: bool = False):
         print("\n")
 
     print("\nAnalytics run complete.")
-    print(f"Total transactions processed (including failures): {len(raw_results)}")
+    print(f"Total unique transactions processed: {len(raw_results)}")
 
     base_results_dir = "results"
     mode_results_dir = os.path.join(base_results_dir, config.analysis_mode)
@@ -336,6 +367,15 @@ def run_analytics(verbose: bool = False):
         plot_privado_genesis_cumulative(privado_decoded_results, timestamped_results_dir, current_timestamp)
         plot_privado_genesis_daily(privado_decoded_results, timestamped_results_dir, current_timestamp)
         plot_privado_identity_frequency_bubble_chart(privado_decoded_results, timestamped_results_dir, current_timestamp)
+
+    elif config.analysis_mode == 'worldid':
+        worldid_decoded_results = [r for r in raw_results if r.get("worldid_decoding_successful")]
+        successful_count = len(worldid_decoded_results)
+        failed_count = len(raw_results) - successful_count
+
+        plot_worldid_decoding_success(successful_count, failed_count, timestamped_results_dir, current_timestamp)
+        plot_worldid_registrations_cumulative(worldid_decoded_results, timestamped_results_dir, current_timestamp)
+        plot_worldid_registrations_daily(worldid_decoded_results, timestamped_results_dir, current_timestamp)
 
     elif config.analysis_mode == 'civic':
         civic_minting_results = [r for r in raw_results if r.get("is_minting_event")]
@@ -361,6 +401,12 @@ def run_analytics(verbose: bool = False):
                  print(f"  Privado Decoding Successful: {result.get('privado_decoding_successful')}")
                  print(f"  Is Genesis Transition: {result.get('is_genesis_transition')}")
                  if result.get('privado_decoding_successful'):
+                      print(f"  Function: {result.get('decoded_function')}")
+                      print(f"  Params: {result.get('decoded_parameters')}")
+            elif config.analysis_mode == 'worldid':
+                 print(f"  World ID Decoding Successful: {result.get('worldid_decoding_successful')}")
+                 print(f"  Is World ID Registration: {result.get('is_worldid_registration')}")
+                 if result.get('worldid_decoding_successful'):
                       print(f"  Function: {result.get('decoded_function')}")
                       print(f"  Params: {result.get('decoded_parameters')}")
             elif config.analysis_mode == 'civic':

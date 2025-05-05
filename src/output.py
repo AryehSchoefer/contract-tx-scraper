@@ -311,7 +311,7 @@ def plot_civic_daily_minted_tokens(results: List[Dict[str, Any]], results_dir: s
         plt.savefig(daily_chart_path)
         print(f"Daily Civic minted tokens chart saved to {daily_chart_path}")
     except Exception as e:
-        print(f"Error saving daily Civic minted tokens chart: {e}")
+        print(f"Error saving Civic minted tokens chart: {e}")
     plt.close()
 
 
@@ -372,6 +372,129 @@ def plot_civic_recipient_address_frequency_bubble_chart(results: List[Dict[str, 
         print(f"Civic recipient address frequency bubble chart saved to {recipient_freq_chart_path}")
     except Exception as e:
         print(f"Error saving Civic recipient address frequency chart: {e}")
+    plt.close()
+
+# --- Functions for World ID Analysis ---
+
+def plot_worldid_decoding_success(successful_count: int, failed_count: int, results_dir: str, timestamp: int):
+    """Generates and saves a bar chart for World ID input decoding success."""
+    print("\nGenerating World ID Decoding Success graphic...")
+
+    labels = ['Successful Decodes', 'Failed Decodes']
+    counts = [successful_count, failed_count]
+    colors = ['#4CAF50', '#F44336']
+
+    plt.figure(figsize=(8, 6))
+    plt.bar(labels, counts, color=colors)
+    plt.ylabel('Number of Transactions')
+    plt.title('World ID Input Data Decoding Results')
+    plt.ylim(0, max(counts) * 1.1)
+
+    for i, count in enumerate(counts):
+        plt.text(i, count + (max(counts) * 0.02), str(count), ha='center')
+
+    plt.tight_layout()
+    decoding_chart_filename = f"{timestamp}_worldid_decoding_results_bar_chart.png"
+    decoding_chart_path = os.path.join(results_dir, decoding_chart_filename)
+    try:
+        plt.savefig(decoding_chart_path)
+        print(f"World ID decoding success bar chart saved to {decoding_chart_path}")
+    except Exception as e:
+        print(f"Error saving World ID decoding success chart: {e}")
+    plt.close()
+
+
+def plot_worldid_registrations_cumulative(results: List[Dict[str, Any]], results_dir: str, timestamp: int):
+    """Generates and saves a line chart for cumulative World ID registrations over time."""
+    print("\nGenerating Cumulative World ID Registrations Over Time graphic...")
+
+    # filter for successfully decoded registration transactions with a timestamp
+    registrations = [
+        r for r in results
+        if r.get("worldid_decoding_successful") and r.get("is_worldid_registration") and r.get("timestamp") is not None
+    ]
+
+    if not registrations:
+        print("No World ID registration transactions with timestamps found to plot over time.")
+        return
+
+    registrations_df = pd.DataFrame(registrations)
+
+    registrations_df['datetime'] = pd.to_datetime(registrations_df['timestamp'], unit='s')
+
+    registrations_df = registrations_df.sort_values(by='datetime')
+
+    registrations_df['cumulative_count'] = range(1, len(registrations_df) + 1)
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(registrations_df['datetime'], registrations_df['cumulative_count'], marker='o', linestyle='-')
+    plt.xlabel('Time')
+    plt.ylabel('Cumulative Count of Registrations')
+    plt.title('Cumulative World ID Registrations Over Time')
+    plt.grid(True)
+
+    plt.gcf().autofmt_xdate()
+
+    plt.tight_layout()
+    cumulative_chart_filename = f"{timestamp}_worldid_cumulative_registrations_over_time.png"
+    cumulative_chart_path = os.path.join(results_dir, cumulative_chart_filename)
+    try:
+        plt.savefig(cumulative_chart_path)
+        print(f"Cumulative World ID registrations chart saved to {cumulative_chart_path}")
+    except Exception as e:
+        print(f"Error saving cumulative World ID registrations chart: {e}")
+    plt.close()
+
+
+def plot_worldid_registrations_daily(results: List[Dict[str, Any]], results_dir: str, timestamp: int):
+    """
+    Generates and saves a bar chart showing the number of World ID registrations per day.
+    """
+    print("\nGenerating Daily World ID Registrations graphic...")
+
+    # filter for successfully decoded registration transactions with a timestamp
+    registrations = [
+        r for r in results
+        if r.get("worldid_decoding_successful") and r.get("is_worldid_registration") and r.get("timestamp") is not None
+    ]
+
+    if not registrations:
+        print("No World ID registration transactions with timestamps found to plot daily counts.")
+        return
+
+    registrations_df = pd.DataFrame(registrations)
+
+    registrations_df['date'] = pd.to_datetime(registrations_df['timestamp'], unit='s').dt.date
+
+    daily_counts = registrations_df['date'].value_counts().sort_index()
+
+    if daily_counts.empty:
+        print("No daily World ID registration counts to plot.")
+        return
+
+    plt.figure(figsize=(15, 7))
+    ax = plt.gca()
+
+    ax.bar(mdates.date2num(daily_counts.index), daily_counts.values, color='skyblue')
+
+    plt.xlabel('Date')
+    plt.ylabel('Number of Registrations')
+    plt.title('Daily World ID Registrations Over Time')
+    plt.grid(axis='y', linestyle='--', alpha=0.6)
+
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    plt.xticks(rotation=45, ha='right')
+
+    plt.tight_layout()
+
+    daily_chart_filename = f"{timestamp}_worldid_daily_registrations.png"
+    daily_chart_path = os.path.join(results_dir, daily_chart_filename)
+    try:
+        plt.savefig(daily_chart_path)
+        print(f"Daily World ID registrations chart saved to {daily_chart_path}")
+    except Exception as e:
+        print(f"Error saving daily World ID registrations chart: {e}")
     plt.close()
 
 
